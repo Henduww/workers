@@ -1,7 +1,7 @@
 mod workers;
 
 fn main() {
-    let workers = workers::Workers::new(1);
+    let workers = workers::Workers::new(4);
 
     workers.post(|| {
         println!("Regular post");

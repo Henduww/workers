@@ -1,11 +1,17 @@
 use std::thread;
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, Mutex, Condvar};
+use std::time;
 
 pub struct Workers {
     num_workers: usize,
     num_active_workers: usize,
-    threads: Vec<thread::JoinHandle<Arc<Mutex<mpsc::Receiver<()>>>>>,
-    sender: mpsc::Sender<Job>,
+    threads: std::vec::Vec<thread::JoinHandle<(Mutex<bool>, Condvar)>>,
+    pair: Arc<(std::sync::Mutex<JobList>, std::sync::Condvar)>
+}
+
+struct JobList {
+    available: bool,
+    jobs: Vec<Job>
 }
 
 type Job = Box<dyn FnOnce() + Send + 'static>;
@@ -13,26 +19,38 @@ type Job = Box<dyn FnOnce() + Send + 'static>;
 impl Workers {
     pub fn new(num_workers: usize) -> Self {
         let mut threads = Vec::with_capacity(num_workers);
+        let job_list = JobList {
+            available: true,
+            jobs: Vec::new()
+        };
 
-        let (sender, receiver) = mpsc::channel();
-
-        let sender: mpsc::Sender<Job> = sender;
-        let receiver = Arc::new(Mutex::new(receiver));
-
+        let pair = Arc::new((Mutex::new(job_list), Condvar::new()));
+        
         for _ in 0..(num_workers) {
-            let thread_receiver = Arc::clone(&receiver);
+            let pair_clone = pair.clone();
             threads.push(thread::spawn(move || loop {
-                let job = thread_receiver.lock().unwrap().recv().unwrap();
+                let (lock, condvar) = &*pair_clone;
+                let mut job_list = lock.lock().unwrap();
+                job_list = condvar.wait_while(job_list, |job_list| !(*job_list).available).unwrap();
 
-                job();
+                let job = (*job_list).jobs.pop();
+
+                if !job.is_none() {
+                    (job.unwrap())();
+                }
+
+                condvar.notify_all();
             }));
         }
+        
+        let (lock, condvar) = &*pair;
+        condvar.notify_all();
 
         Workers {
             num_workers: num_workers,
             num_active_workers: 0,
             threads: threads,
-            sender: sender,
+            pair: pair
         }
     }
 
@@ -43,8 +61,14 @@ impl Workers {
     pub fn post<F>(&self, f: F)
         where F: FnOnce() + Send + 'static
     {
+        let (lock, condvar) = &*self.pair;
+        let mut job_list = lock.lock().unwrap();
+        while !(*job_list).available {
+            job_list = condvar.wait(job_list).unwrap();
+        }
+
         let job = Box::new(f);
-        self.sender.send(job).unwrap();
+        (*job_list).jobs.push(job);
     }
     
     pub fn join(self) {
@@ -53,11 +77,11 @@ impl Workers {
         });
     }
 
-    pub fn post_timeout<F>(&self, f: F, timeout: u32)
+    pub fn post_timeout<F>(&self, f: F, timeout: u64)
         where F: FnOnce() + Send + 'static
     {
         self.post(move || {
-            thread::sleep_ms(timeout);
+            thread::sleep(time::Duration::from_millis(timeout));
             f();
         });
     }
