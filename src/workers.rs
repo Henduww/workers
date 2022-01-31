@@ -3,8 +3,6 @@ use std::sync::{Arc, Mutex, Condvar};
 use std::time;
 
 pub struct Workers {
-    num_workers: usize,
-    num_active_workers: usize,
     threads: std::vec::Vec<thread::JoinHandle<()>>,
     pair: Arc<(std::sync::Mutex<JobList>, std::sync::Condvar)>
 }
@@ -35,14 +33,18 @@ impl Workers {
                 let mut job_list = lock.lock().unwrap();
                 job_list = condvar.wait_while(job_list, |job_list| !(*job_list).available).unwrap();
 
+                (*job_list).available = false;
                 if (*job_list).jobs.len() == 0 && (*job_list).stopped {
+                    (*job_list).available = true;
+                    condvar.notify_all();
                     break;
                 }
                 
                 let job = (*job_list).jobs.pop();
 
+                (*job_list).available = true;
                 drop(job_list);
-                condvar.notify_one();
+                condvar.notify_all();
                 
                 if !job.is_none() {
                     (job.unwrap())();
@@ -51,8 +53,6 @@ impl Workers {
         }
 
         Workers {
-            num_workers: num_workers,
-            num_active_workers: 0,
             threads: threads,
             pair: pair
         }
@@ -63,7 +63,7 @@ impl Workers {
         let mut job_list = lock.lock().unwrap();
         
         (*job_list).available = true;
-        condvar.notify_one();
+        condvar.notify_all();
     }
 
     pub fn post<F>(&self, f: F)
@@ -73,8 +73,10 @@ impl Workers {
         let mut job_list = lock.lock().unwrap();
         job_list = condvar.wait_while(job_list, |job_list| !(*job_list).available).unwrap();
 
+        (*job_list).available = false;
         let job = Box::new(f);
         (*job_list).jobs.push(job);
+        (*job_list).available = true;
     }
     
     pub fn join(self) {
@@ -82,12 +84,14 @@ impl Workers {
         let mut job_list = lock.lock().unwrap();
         job_list = condvar.wait_while(job_list, |job_list| !(*job_list).available).unwrap();
 
+        (*job_list).available = false;
         (*job_list).stopped = true;
+        (*job_list).available = true;
 
         drop(job_list);
 
         self.threads.into_iter().for_each(|thread| {
-            thread.join();
+            let _ = thread.join();
         });
     }
 
@@ -95,7 +99,6 @@ impl Workers {
         where F: FnOnce() + Send + 'static
     {
         self.post(move || {
-            println!("Timeout started");
             thread::sleep(time::Duration::from_millis(timeout));
             f();
         });
