@@ -3,6 +3,8 @@ mod workers;
 fn main() {
     let workers = workers::Workers::new(4);
 
+    workers.start();
+
     workers.post(|| {
         println!("Regular post 1");
     });

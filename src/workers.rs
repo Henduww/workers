@@ -5,7 +5,7 @@ use std::time;
 pub struct Workers {
     num_workers: usize,
     num_active_workers: usize,
-    threads: std::vec::Vec<thread::JoinHandle<(Mutex<bool>, Condvar)>>,
+    threads: std::vec::Vec<thread::JoinHandle<()>>,
     pair: Arc<(std::sync::Mutex<JobList>, std::sync::Condvar)>
 }
 
@@ -13,15 +13,17 @@ type Job = Box<dyn FnOnce() + Send + 'static>;
 
 struct JobList {
     available: bool,
-    jobs: Vec<Job>
+    jobs: Vec<Job>,
+    stopped: bool
 }
 
 impl Workers {
     pub fn new(num_workers: usize) -> Self {
         let mut threads = Vec::with_capacity(num_workers);
         let job_list = JobList {
-            available: true,
-            jobs: Vec::new()
+            available: false,
+            jobs: Vec::new(),
+            stopped: false
         };
 
         let pair = Arc::new((Mutex::new(job_list), Condvar::new()));
@@ -33,10 +35,15 @@ impl Workers {
                 let mut job_list = lock.lock().unwrap();
                 job_list = condvar.wait_while(job_list, |job_list| !(*job_list).available).unwrap();
 
+                if (*job_list).jobs.len() == 0 && (*job_list).stopped {
+                    break;
+                }
+                
                 let job = (*job_list).jobs.pop();
 
                 drop(job_list);
-
+                condvar.notify_one();
+                
                 if !job.is_none() {
                     (job.unwrap())();
                 }
@@ -52,7 +59,11 @@ impl Workers {
     }
 
     pub fn start(&self) {
+        let (lock, condvar) = &*self.pair;
+        let mut job_list = lock.lock().unwrap();
         
+        (*job_list).available = true;
+        condvar.notify_one();
     }
 
     pub fn post<F>(&self, f: F)
@@ -60,15 +71,21 @@ impl Workers {
     {
         let (lock, condvar) = &*self.pair;
         let mut job_list = lock.lock().unwrap();
-        while !(*job_list).available {
-            job_list = condvar.wait(job_list).unwrap();
-        }
+        job_list = condvar.wait_while(job_list, |job_list| !(*job_list).available).unwrap();
 
         let job = Box::new(f);
         (*job_list).jobs.push(job);
     }
     
     pub fn join(self) {
+        let (lock, condvar) = &*self.pair;
+        let mut job_list = lock.lock().unwrap();
+        job_list = condvar.wait_while(job_list, |job_list| !(*job_list).available).unwrap();
+
+        (*job_list).stopped = true;
+
+        drop(job_list);
+
         self.threads.into_iter().for_each(|thread| {
             thread.join();
         });
@@ -82,9 +99,5 @@ impl Workers {
             thread::sleep(time::Duration::from_millis(timeout));
             f();
         });
-    }
-
-    pub fn stop(&self) {
-
     }
 }
