@@ -9,12 +9,12 @@ pub struct Workers {
     pair: Arc<(std::sync::Mutex<JobList>, std::sync::Condvar)>
 }
 
+type Job = Box<dyn FnOnce() + Send + 'static>;
+
 struct JobList {
     available: bool,
     jobs: Vec<Job>
 }
-
-type Job = Box<dyn FnOnce() + Send + 'static>;
 
 impl Workers {
     pub fn new(num_workers: usize) -> Self {
@@ -32,6 +32,7 @@ impl Workers {
                 let (lock, condvar) = &*pair_clone;
                 let mut job_list = lock.lock().unwrap();
                 job_list = condvar.wait_while(job_list, |job_list| !(*job_list).available).unwrap();
+                (*job_list).available = false;
 
                 let job = (*job_list).jobs.pop();
 
@@ -39,12 +40,11 @@ impl Workers {
                     (job.unwrap())();
                 }
 
+                (*job_list).available = true;
+                
                 condvar.notify_all();
             }));
         }
-        
-        let (lock, condvar) = &*pair;
-        condvar.notify_all();
 
         Workers {
             num_workers: num_workers,
