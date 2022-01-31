@@ -25,24 +25,21 @@ impl Workers {
         };
 
         let pair = Arc::new((Mutex::new(job_list), Condvar::new()));
-        
+
         for _ in 0..(num_workers) {
             let pair_clone = pair.clone();
             threads.push(thread::spawn(move || loop {
                 let (lock, condvar) = &*pair_clone;
                 let mut job_list = lock.lock().unwrap();
                 job_list = condvar.wait_while(job_list, |job_list| !(*job_list).available).unwrap();
-                (*job_list).available = false;
 
                 let job = (*job_list).jobs.pop();
+
+                drop(job_list);
 
                 if !job.is_none() {
                     (job.unwrap())();
                 }
-
-                (*job_list).available = true;
-                
-                condvar.notify_all();
             }));
         }
 
@@ -81,6 +78,7 @@ impl Workers {
         where F: FnOnce() + Send + 'static
     {
         self.post(move || {
+            println!("Timeout started");
             thread::sleep(time::Duration::from_millis(timeout));
             f();
         });
